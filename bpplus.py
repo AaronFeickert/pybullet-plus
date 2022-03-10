@@ -3,21 +3,28 @@
 # {(H,G,n),C ; (v,r) | 0 <= v < 2^n, C = vH + rG}
 
 import dumb25519
-from dumb25519 import Point, Scalar, ScalarVector, PointVector, hash_to_scalar, random_scalar, hash_to_point, multiexp
+from dumb25519 import Point, Scalar, ScalarVector, PointVector, random_scalar, multiexp
+from hashlib import blake2b
 import transcript
 
 class RangeParameters:
-	def __init__(self,H,G,N):
+	def __init__(self,H,G,N,Gi,Hi):
 		if not isinstance(H,Point):
 			raise TypeError('Bad type for parameter H!')
 		if not isinstance(G,Point):
 			raise TypeError('Bad type for parameter G!')
 		if not isinstance(N,int) or N < 1:
 			raise ValueError('Bad type or value for parameter N!')
+		if not isinstance(Gi,PointVector) or not len(Gi) == N:
+			raise ValueError('Bad type or value for parameter Gi!')
+		if not isinstance(Hi,PointVector) or not len(Hi) == N:
+			raise ValueError('Bad type or value for parameter Hi!')
 		
 		self.H = H
 		self.G = G
 		self.N = N
+		self.Gi = Gi
+		self.Hi = Hi
 
 class RangeStatement:
 	def __init__(self,params,C,seed=None):
@@ -26,19 +33,12 @@ class RangeStatement:
 		if not isinstance(C,Point):
 			raise TypeError('Bad type for range statement input C!')
 
-		# If present, the seed must be hashable
-		try:
-			if seed is not None:
-				hash_to_scalar(seed)
-		except:
-			raise TypeError('Range witness seed must be hashable!')
-		
 		self.G = params.G
 		self.H = params.H
 		self.N = params.N
+		self.Gi = params.Gi
+		self.Hi = params.Hi
 		self.C = C
-		self.Gi = PointVector([hash_to_point('Gi ' + str(i)) for i in range(self.N)])
-		self.Hi = PointVector([hash_to_point('Hi ' + str(i)) for i in range(self.N)])
 		self.seed = seed
 
 class RangeWitness:
@@ -52,18 +52,6 @@ class RangeWitness:
 		self.r = r
 
 class RangeProof:
-	def __repr__(self):
-		return repr(hash_to_scalar(
-			self.A,
-			self.A1,
-			self.B,
-			self.r1,
-			self.s1,
-			self.d1,
-			self.L,
-			self.R
-		))
-
 	def __init__(self,A,A1,B,r1,s1,d1,L,R):
 		if not isinstance(A,Point):
 			raise TypeError('Bad type for range proof element A!')
@@ -124,6 +112,39 @@ class InnerProductRound:
 		# Seed for mask recovery
 		self.round = 0
 		self.seed = seed
+
+# Produce mask-recovery nonces 
+#
+# INPUTS
+#	seed: secret value shared by prover and verifier (Point)
+#	label: identifier for the variable from the protocol (string)
+#	j: index for multi-round values, if applicable (int or None)
+# OUTPUTS
+#	Scalar
+# WARNING
+#	The seed value must NEVER be reused across proofs, and should be effectively pseudorandom
+def nonce(seed,label,j=None):
+	# Check input sizes for compatibility with the Blake2b specification
+	encoded_seed = str(seed).encode('utf-8')
+	encoded_label = str(label).encode('utf-8')
+	encoded_j = str(j).encode('utf-8')
+	if len(encoded_seed) > blake2b.MAX_KEY_SIZE:
+		raise TypeError('Nonce seed is too large!')
+	if len(encoded_label) > blake2b.PERSON_SIZE:
+		raise TypeError('Nonce label is too large!')
+	if len(encoded_j) > blake2b.SALT_SIZE:
+		raise TypeError('Nonce index is too large!')
+	
+	hasher = blake2b(digest_size=32,key=encoded_seed,person=encoded_label,salt=encoded_j)
+
+	# Produce a uniform Scalar output for the hash
+	while True:
+		result = hasher.hexdigest()
+		if int(result,16) < dumb25519.l:
+			return Scalar(int(result,16))
+		
+		# Update the hash with any fixed value to try again!
+		hasher.update(b'0')
 
 # Compute a weighted inner product
 #
@@ -189,8 +210,8 @@ def inner_product(data):
 		# Random masks
 		r = random_scalar()
 		s = random_scalar()
-		d = random_scalar() if data.seed is None else hash_to_scalar(data.seed,'d')
-		eta = random_scalar() if data.seed is None else hash_to_scalar(data.seed,'eta')
+		d = random_scalar() if data.seed is None else nonce(data.seed,'d')
+		eta = random_scalar() if data.seed is None else nonce(data.seed,'eta')
 
 		data.A = data.Gi[0]*r + data.Hi[0]*s + data.H*(r*data.y*data.b[0] + s*data.y*data.a[0]) + data.G*d
 		data.B = data.H*(r*data.y*s) + data.G*eta
@@ -215,8 +236,8 @@ def inner_product(data):
 	H1 = data.Hi[:n]
 	H2 = data.Hi[n:]
 
-	dL = random_scalar() if data.seed is None else hash_to_scalar(data.seed,'dL',data.round)
-	dR = random_scalar() if data.seed is None else hash_to_scalar(data.seed,'dR',data.round)
+	dL = random_scalar() if data.seed is None else nonce(data.seed,'dL',data.round)
+	dR = random_scalar() if data.seed is None else nonce(data.seed,'dR',data.round)
 	data.round += 1
 
 	cL = wip(a1,b2,data.y)
@@ -255,11 +276,11 @@ def prove(statement,witness):
 	Hi = statement.Hi
 
 	tr = transcript.Transcript('Bulletproof+')
-	tr.update(G)
 	tr.update(H)
+	tr.update(G)
+	tr.update(N)
 	tr.update(Gi)
 	tr.update(Hi)
-	tr.update(N)
 	tr.update(statement.C)
 
 	one_N = ScalarVector([Scalar(1) for _ in range(N)])
@@ -269,7 +290,7 @@ def prove(statement,witness):
 	aL = scalar_to_bits(witness.v,N)
 	aR = aL - one_N
 
-	alpha = random_scalar() if statement.seed is None else hash_to_scalar(statement.seed,'alpha')
+	alpha = random_scalar() if statement.seed is None else nonce(statement.seed,'alpha')
 	A = Gi**aL + Hi**aR + G*alpha
 
 	# Get challenges
@@ -384,11 +405,11 @@ def verify(statements,proofs):
 
 		# Start transcript
 		tr = transcript.Transcript('Bulletproof+')
-		tr.update(G)
 		tr.update(H)
+		tr.update(G)
+		tr.update(N)
 		tr.update(Gi)
 		tr.update(Hi)
-		tr.update(N)
 		tr.update(C)
 
 		# Reconstruct challenges
@@ -416,11 +437,11 @@ def verify(statements,proofs):
 
 		# Recover the mask if possible
 		if seed is not None:
-			mask = (d1 - hash_to_scalar(seed,'eta') - e*hash_to_scalar(seed,'d'))*e.invert()**2
-			mask -= hash_to_scalar(seed,'alpha')
+			mask = (d1 - nonce(seed,'eta') - e*nonce(seed,'d'))*e.invert()**2
+			mask -= nonce(seed,'alpha')
 			for j in range(len(challenges)):
-				mask -= challenges[j]**2*hash_to_scalar(seed,'dL',j)
-				mask -= challenges_inv[j]**2*hash_to_scalar(seed,'dR',j)
+				mask -= challenges[j]**2*nonce(seed,'dL',j)
+				mask -= challenges_inv[j]**2*nonce(seed,'dR',j)
 			mask *= y.invert()**(N+1)
 
 			masks.append(mask)

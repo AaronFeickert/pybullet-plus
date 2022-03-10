@@ -1,12 +1,19 @@
 import bpplus
-from dumb25519 import random_point, random_scalar, Scalar
+from dumb25519 import random_point, random_scalar, Scalar, PointVector
 from random import randrange
 import unittest
 
 class TestBPPlus(unittest.TestCase):
 	def test_complete(self):
-		params = bpplus.RangeParameters(random_point(),random_point(),4) # last parameter is the bit length
+		N = 4 # bit length
 		n_proofs = 3 # number of proofs to verify in a batch
+
+		# Produce generators at random; in practice these would be public and reproducible
+		H = random_point()
+		G = random_point()
+		Gi = PointVector([random_point() for _ in range(N)])
+		Hi = PointVector([random_point() for _ in range(N)])
+		params = bpplus.RangeParameters(H,G,N,Gi,Hi)
 
 		statements = []
 		proofs = []
