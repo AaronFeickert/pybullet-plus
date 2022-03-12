@@ -127,15 +127,18 @@ def nonce(seed,label,j=None):
 	# Check input sizes for compatibility with the Blake2b specification
 	encoded_seed = str(seed).encode('utf-8')
 	encoded_label = str(label).encode('utf-8')
-	encoded_j = str(j).encode('utf-8')
+	encoded_j = str(j).encode('utf-8') if j is not None else None
 	if len(encoded_seed) > blake2b.MAX_KEY_SIZE:
 		raise TypeError('Nonce seed is too large!')
 	if len(encoded_label) > blake2b.PERSON_SIZE:
 		raise TypeError('Nonce label is too large!')
-	if len(encoded_j) > blake2b.SALT_SIZE:
+	if encoded_j is not None and len(encoded_j) > blake2b.SALT_SIZE:
 		raise TypeError('Nonce index is too large!')
-	
-	hasher = blake2b(digest_size=32,key=encoded_seed,person=encoded_label,salt=encoded_j)
+
+	if encoded_j is not None:	
+		hasher = blake2b(digest_size=32,key=encoded_seed,person=encoded_label,salt=encoded_j)
+	else:
+		hasher = blake2b(digest_size=32,key=encoded_seed,person=encoded_label)
 
 	# Produce a uniform Scalar output for the hash
 	while True:
