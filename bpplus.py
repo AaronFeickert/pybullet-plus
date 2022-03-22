@@ -14,13 +14,17 @@ from hashlib import blake2b
 import transcript
 
 class RangeParameters:
-	def __init__(self,H,G,N,Gi,Hi):
+	def __init__(self,H,G,N,T,Gi,Hi):
 		if not isinstance(H,Point):
 			raise TypeError('Bad type for parameter H!')
-		if not isinstance(G,Point):
+		if not isinstance(G,PointVector):
 			raise TypeError('Bad type for parameter G!')
 		if not isinstance(N,int):
 			raise TypeError('Bad type for parameter N!')
+		if not isinstance(T,int) or T < 1:
+			raise ValueError('Bad type or value for parameter T!')
+		if not len(G) == T:
+			raise ValueError('Bad size for parameter G!')
 		if not isinstance(Gi,PointVector):
 			raise ValueError('Bad type or value for parameter Gi!')
 		if not isinstance(Hi,PointVector):
@@ -35,6 +39,7 @@ class RangeParameters:
 		self.H = H
 		self.G = G
 		self.N = N
+		self.T = T
 		self.Gi = Gi
 		self.Hi = Hi
 
@@ -61,24 +66,38 @@ class RangeStatement:
 		self.G = params.G
 		self.H = params.H
 		self.N = params.N
+		self.T = params.T
 		self.M = M
 		self.Gi = params.Gi
 		self.Hi = params.Hi
 		self.C = C
 		self.seed = seed
 
-class RangeWitness:
+class CommitmentOpening:
 	def __init__(self,v,r):
-		if not isinstance(v,ScalarVector):
-			raise TypeError('Bad type for range witness v!')
+		if not isinstance(v,Scalar):
+			raise TypeError('Bad type for commitment opening v!')
 		if not isinstance(r,ScalarVector):
-			raise TypeError('Bad type for range witness r!')
-		if not len(v) == len(r):
-			raise IndexError('Range witness data length mismatch!')
+			raise TypeError('Bad type for commitment opening r!')
 		
-		# Validity of these values is further checked in the prover
 		self.v = v
 		self.r = r
+
+class RangeWitness:
+	def __init__(self,openings):
+		if not isinstance(openings,list):
+			raise TypeError('Bad type for range witness!')
+		T = 0
+		for opening in openings:
+			if not isinstance(opening,CommitmentOpening):
+				raise TypeError('Bad type for range witness!')
+			if T == 0:
+				T = len(opening.r)
+			else:
+				if not len(opening.r) == T:
+					raise ValueError('Bad value for range witness!')
+		
+		self.openings = openings
 
 class RangeProof:
 	def __init__(self,A,A1,B,r1,s1,d1,L,R):
@@ -92,7 +111,7 @@ class RangeProof:
 			raise TypeError('Bad type for range proof element r1!')
 		if not isinstance(s1,Scalar):
 			raise TypeError('Bad type for range proof element s1!')
-		if not isinstance(d1,Scalar):
+		if not isinstance(d1,ScalarVector):
 			raise TypeError('Bad type for range proof element d1!')
 		if not isinstance(L,PointVector):
 			raise TypeError('Bad type for range proof element L!')
@@ -148,15 +167,17 @@ class InnerProductRound:
 #	seed: secret value shared by prover and verifier (Point)
 #	label: identifier for the variable from the protocol (string)
 #	j: index for multi-round values, if applicable (int or None)
+#	k: index for multi-round values, if applicable (int or None)
 # OUTPUTS
 #	Scalar
 # WARNING
 #	The seed value must NEVER be reused across proofs, and should be effectively pseudorandom
-def nonce(seed,label,j=None):
+def nonce(seed,label,j,k):
 	# Check input sizes for compatibility with the Blake2b specification
 	encoded_seed = str(seed).encode('utf-8')
 	encoded_label = str(label).encode('utf-8')
 	encoded_j = str(j).encode('utf-8') if j is not None else None
+	encoded_k = str(j).encode('utf-8') if k is not None else None
 	if len(encoded_seed) > blake2b.MAX_KEY_SIZE:
 		raise TypeError('Nonce seed is too large!')
 	if len(encoded_label) > blake2b.PERSON_SIZE:
@@ -171,6 +192,8 @@ def nonce(seed,label,j=None):
 
 	# Produce a uniform Scalar output for the hash
 	while True:
+		if encoded_k is not None:
+			hasher.update(encoded_k)
 		result = hasher.hexdigest()
 		if int(result,16) < dumb25519.l:
 			return Scalar(int(result,16))
@@ -201,6 +224,7 @@ def scalar_to_bits(s,N):
 #   data: round data (InnerProductRound)
 def inner_product(data):
 	n = len(data.Gi)
+	T = len(data.alpha)
 
 	if n == 1:
 		data.done = True
@@ -208,11 +232,14 @@ def inner_product(data):
 		# Random masks
 		r = random_scalar()
 		s = random_scalar()
-		d = random_scalar() if data.seed is None else nonce(data.seed,'d')
-		eta = random_scalar() if data.seed is None else nonce(data.seed,'eta')
+		d = [random_scalar() if data.seed is None else nonce(data.seed,'d',None,k) for k in range(T)]
+		eta = [random_scalar() if data.seed is None else nonce(data.seed,'eta',None,k) for k in range(T)]
 
-		data.A = data.Gi[0]*r + data.Hi[0]*s + data.H*(r*data.y_powers[1]*data.b[0] + s*data.y_powers[1]*data.a[0]) + data.G*d
-		data.B = data.H*(r*data.y_powers[1]*s) + data.G*eta
+		data.A = data.Gi[0]*r + data.Hi[0]*s + data.H*(r*data.y_powers[1]*data.b[0] + s*data.y_powers[1]*data.a[0])
+		data.B = data.H*(r*data.y_powers[1]*s)
+		for k in range(T):
+			data.A += data.G[k]*d[k]
+			data.B += data.G[k]*eta[k]
 
 		data.tr.update(data.A)
 		data.tr.update(data.B)
@@ -220,7 +247,7 @@ def inner_product(data):
 
 		data.r1 = r + data.a[0]*e
 		data.s1 = s + data.b[0]*e
-		data.d1 = eta + d*e + data.alpha*e**2
+		data.d1 = ScalarVector([eta[k] + d[k]*e + data.alpha[k]*e**2 for k in range(T)])
 
 		return
 
@@ -235,8 +262,8 @@ def inner_product(data):
 	H2 = data.Hi[n:]
 	y_n_inverse = data.y_powers[n].invert()
 
-	dL = random_scalar() if data.seed is None else nonce(data.seed,'dL',data.round)
-	dR = random_scalar() if data.seed is None else nonce(data.seed,'dR',data.round)
+	dL = [random_scalar() if data.seed is None else nonce(data.seed,'dL',data.round,k) for k in range(T)]
+	dR = [random_scalar() if data.seed is None else nonce(data.seed,'dR',data.round,k) for k in range(T)]
 	data.round += 1
 
 	cL = Scalar(0)
@@ -246,10 +273,15 @@ def inner_product(data):
 		cR += a2[i]*data.y_powers[n + i + 1]*b1[i]
 	
 	# Compute L and R by multiscalar multiplication
-	L_scalars = ScalarVector([cL, dL])
-	L_points = PointVector([data.H, data.G])
-	R_scalars = ScalarVector([cR, dR])
-	R_points = PointVector([data.H, data.G])
+	L_scalars = ScalarVector([cL])
+	L_points = PointVector([data.H])
+	R_scalars = ScalarVector([cR])
+	R_points = PointVector([data.H])
+	for k in range(T):
+		L_scalars.append(dL[k])
+		L_points.append(data.G[k])
+		R_scalars.append(dR[k])
+		R_points.append(data.G[k])
 	for i in range(n):
 		L_scalars.append(a1[i]*y_n_inverse)
 		L_points.append(G2[i])
@@ -272,7 +304,7 @@ def inner_product(data):
 
 	data.a = a1*e + a2*data.y_powers[n]*e_inverse
 	data.b = b1*e_inverse + b2*e
-	data.alpha = dL*e**2 + data.alpha + dR*e_inverse**2
+	data.alpha = ScalarVector([dL[k]*e**2 + data.alpha[k] + dR[k]*e_inverse**2 for k in range(T)])
 
 # Generate a proof
 def prove(statement,witness):
@@ -283,10 +315,16 @@ def prove(statement,witness):
 	
 	# Check the statement validity
 	M = len(statement.C)
-	if not len(witness.v) == M or not len(witness.r) == M:
+	T = statement.T
+	if not len(witness.openings) == M:
 		raise ValueError('Invalid range statement!')
+	if not len(statement.G) == T:
+		raise ValueError('Not enough generators for this statement!')
 	for j in range(M):
-		if not statement.C[j] == statement.H*witness.v[j] + statement.G*witness.r[j]:
+		C_ = statement.H*witness.openings[j].v
+		for k in range(T):
+			C_ += statement.G[k]*witness.openings[j].r[k]
+		if not statement.C[j] == C_:
 			raise ArithmeticError('Invalid range statement!')
 
 	N = statement.N
@@ -301,6 +339,7 @@ def prove(statement,witness):
 	tr.update(H)
 	tr.update(G)
 	tr.update(N)
+	tr.update(T)
 	tr.update(M)
 	tr.update(Gi)
 	tr.update(Hi)
@@ -310,14 +349,17 @@ def prove(statement,witness):
 	aL = ScalarVector([])
 	aR = ScalarVector([])
 	for j in range(M):
-		bits = scalar_to_bits(witness.v[j], N)
+		bits = scalar_to_bits(witness.openings[j].v, N)
 		aL.extend(bits)
 		aR.extend(ScalarVector([bit - Scalar(1) for bit in bits]))
 
 	# Compute A by multiscalar multiplication
-	alpha = random_scalar() if statement.seed is None else nonce(statement.seed,'alpha')
-	A_scalars = ScalarVector([alpha])
-	A_points = PointVector([G])
+	alpha = ScalarVector([random_scalar() if statement.seed is None else nonce(statement.seed,'alpha',None,k) for k in range(T)])
+	A_scalars = ScalarVector([])
+	A_points = PointVector([])
+	for k in range(T):
+		A_scalars.append(alpha[k])
+		A_points.append(G[k])
 	for i in range(N*M):
 		A_scalars.append(aL[i])
 		A_points.append(Gi[i])
@@ -347,11 +389,12 @@ def prove(statement,witness):
 	# Prepare for inner product
 	aL1 = aL - ScalarVector([z for _ in range(N*M)])
 	aR1 = aR + ScalarVector([d[i]*y_powers[N*M - i] + z for i in range(N*M)])
-	alpha1 = alpha
+	alpha1 = ScalarVector([alpha[k] for k in range(T)])
 	z_even_powers = 1
 	for j in range(M):
 		z_even_powers *= z_square
-		alpha1 += z_even_powers*witness.r[j]*y_powers[N*M + 1]
+		for k in range(T):
+			alpha1[k] += z_even_powers*witness.openings[j].r[k]*y_powers[N*M + 1]
 
 	# Initial inner product inputs
 	ip_data = InnerProductRound(Gi,Hi,G,H,aL1,aR1,alpha1,y_powers,tr,statement.seed)
@@ -368,6 +411,7 @@ def verify(statements,proofs):
 	G = None
 	H = None
 	N = None
+	T = None
 	max_MN = None
 	Gi = None
 	Hi = None
@@ -395,13 +439,18 @@ def verify(statements,proofs):
 		else:
 			N = statement.N
 
+		if T is not None and statement.T != T:
+			raise ValueError('Inconsistent range batch statements!')
+		else:
+			T = statement.T
+
 		if max_MN is None or len(statement.C)*statement.N > max_MN:
 			max_MN = len(statement.C)*statement.N
 			Gi = statement.Gi
 			Hi = statement.Hi
 	
 	# Confirm we have valid statement values
-	if G is None or H is None or N is None or max_MN is None or Gi is None or Hi is None:
+	if G is None or H is None or N is None or T is None or max_MN is None or Gi is None or Hi is None:
 		raise ValueError('Bad range batch statement!')
 		
 	for proof in proofs:
@@ -422,7 +471,7 @@ def verify(statements,proofs):
 	TWO_N_MINUS_ONE -= Scalar(1)
 
 	# Weighted coefficients for common generators
-	G_scalar = Scalar(0)
+	G_scalar = ScalarVector([Scalar(0) for _ in range(T)])
 	H_scalar = Scalar(0)
 	Gi_scalars = ScalarVector([Scalar(0)]*max_MN)
 	Hi_scalars = ScalarVector([Scalar(0)]*max_MN)
@@ -466,6 +515,7 @@ def verify(statements,proofs):
 		tr.update(H)
 		tr.update(G)
 		tr.update(N)
+		tr.update(T)
 		tr.update(M)
 		tr.update(Gi[:N*M])
 		tr.update(Hi[:N*M])
@@ -529,14 +579,18 @@ def verify(statements,proofs):
 			d_sum_temp_2M //= 2
 		d_sum *= TWO_N_MINUS_ONE
 
-		# Recover the mask if possible (only for non-aggregated proofs)
+		# Recover the masks if possible (only for non-aggregated proofs)
 		if M == 1 and seed is not None:
-			mask = (d1 - nonce(seed,'eta') - e*nonce(seed,'d'))*e.invert()**2
-			mask -= nonce(seed,'alpha')
-			for j in range(rounds):
-				mask -= challenges[j]**2*nonce(seed,'dL',j)
-				mask -= challenges_inv[j]**2*nonce(seed,'dR',j)
-			mask *= (z_square*y_NM_1).invert()
+			mask = ScalarVector([])
+			for k in range(T):
+				temp = (d1[k] - nonce(seed,'eta',None,k) - e*nonce(seed,'d',None,k))*e.invert()**2
+				temp -= nonce(seed,'alpha',None,k)
+				for j in range(rounds):
+					temp -= challenges[j]**2*nonce(seed,'dL',j,k)
+					temp -= challenges_inv[j]**2*nonce(seed,'dR',j,k)
+				temp *= (z_square*y_NM_1).invert()
+
+				mask.append(temp)
 
 			masks.append(mask)
 		else:
@@ -570,7 +624,7 @@ def verify(statements,proofs):
 			points.append(C[j])
 
 		H_scalar += weight*(r1*y*s1 + e_square*(y_NM_1*z*d_sum + (z**2-z)*y_sum))
-		G_scalar += weight*d1
+		G_scalar = ScalarVector([G_scalar[k] + weight*d1[k] for k in range(T)])
 
 		scalars.append(weight*-e)
 		points.append(A1)
@@ -586,8 +640,9 @@ def verify(statements,proofs):
 			points.append(R[j])
 
 	# Common generators
-	scalars.append(G_scalar)
-	points.append(G)
+	for k in range(T):
+		scalars.append(G_scalar[k])
+		points.append(G[k])
 	scalars.append(H_scalar)
 	points.append(H)
 	for i in range(max_MN):
