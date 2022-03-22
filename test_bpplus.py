@@ -1,33 +1,33 @@
 import bpplus
-from dumb25519 import random_point, random_scalar, Scalar, PointVector
+from dumb25519 import random_point, random_scalar, Scalar, ScalarVector,PointVector
 from random import randrange
 import unittest
 
 class TestBPPlus(unittest.TestCase):
 	def test_complete(self):
 		N = 4 # bit length
-		n_proofs = 3 # number of proofs to verify in a batch
+		M = [1, 2, 4] # aggregation factor for each proof in a batch
 
 		# Produce generators at random; in practice these would be public and reproducible
 		H = random_point()
 		G = random_point()
-		Gi = PointVector([random_point() for _ in range(N)])
-		Hi = PointVector([random_point() for _ in range(N)])
+		Gi = PointVector([random_point() for _ in range(max(M)*N)])
+		Hi = PointVector([random_point() for _ in range(max(M)*N)])
 		params = bpplus.RangeParameters(H,G,N,Gi,Hi)
 
 		statements = []
 		proofs = []
 		masks = []
-		for _ in range(n_proofs):
+		for j in range(len(M)):
 			# Generate the witness
-			v = Scalar(randrange(0,2**params.N))
-			r = random_scalar()
-			masks.append(r)
+			v = ScalarVector([Scalar(randrange(0,2**params.N)) for _ in range(M[j])])
+			r = ScalarVector([random_scalar() for _ in range(M[j])])
+			masks.append(r[0] if M[j] == 1 else None)
 			witness = bpplus.RangeWitness(v,r)
 
 			# Generate the statement
-			C = params.H*v + params.G*r
-			seed = random_scalar()
+			C = PointVector([params.H*v[j] + params.G*r[j] for j in range(M[j])])
+			seed = random_scalar() if M[j] == 1 else None
 			statement = bpplus.RangeStatement(params,C,seed)
 			statements.append(statement)
 
@@ -39,30 +39,30 @@ class TestBPPlus(unittest.TestCase):
 		masks_ = bpplus.verify(statements,proofs)
 		self.assertEqual(masks,masks_)
 
-	def test_evil_seed(self):
+	def test_bad_batch(self):
 		N = 4 # bit length
-		n_proofs = 3 # number of proofs to verify in a batch
+		M = [1, 2, 4] # aggregation factor for each proof in a batch
 
 		# Produce generators at random; in practice these would be public and reproducible
 		H = random_point()
 		G = random_point()
-		Gi = PointVector([random_point() for _ in range(N)])
-		Hi = PointVector([random_point() for _ in range(N)])
+		Gi = PointVector([random_point() for _ in range(max(M)*N)])
+		Hi = PointVector([random_point() for _ in range(max(M)*N)])
 		params = bpplus.RangeParameters(H,G,N,Gi,Hi)
 
 		statements = []
 		proofs = []
 		masks = []
-		for _ in range(n_proofs):
+		for j in range(len(M)):
 			# Generate the witness
-			v = Scalar(randrange(0,2**params.N))
-			r = random_scalar()
-			masks.append(r)
+			v = ScalarVector([Scalar(randrange(0,2**params.N)) for _ in range(M[j])])
+			r = ScalarVector([random_scalar() for _ in range(M[j])])
+			masks.append(r[0] if M[j] == 1 else None)
 			witness = bpplus.RangeWitness(v,r)
 
 			# Generate the statement
-			C = params.H*v + params.G*r
-			seed = random_scalar()
+			C = PointVector([params.H*v[j] + params.G*r[j] for j in range(M[j])])
+			seed = random_scalar() if M[j] == 1 else None
 			statement = bpplus.RangeStatement(params,C,seed)
 			statements.append(statement)
 
@@ -70,16 +70,12 @@ class TestBPPlus(unittest.TestCase):
 			proof = bpplus.prove(statement,witness)
 			proofs.append(proof)
 		
-		# Use an evil seed for one of the proofs
-		statements[0].seed = random_scalar()
+		# Make one of the proofs invalid
+		proofs[0].A = random_point()
 
 		# Verify the entire batch
-		masks_ = bpplus.verify(statements,proofs)
-
-		# The mask corresponding to the evil seed should not match
-		self.assertNotEqual(masks[0],masks_[0])
-		for i in range(1,n_proofs):
-			self.assertEqual(masks[i],masks_[i])
+		with self.assertRaises(ArithmeticError):
+			bpplus.verify(statements,proofs)
 
 if __name__ == '__main__':
 	unittest.main()

@@ -1,6 +1,12 @@
 # Bulletproof+ range proof
 #
-# {(H,G,n),C ; (v,r) | 0 <= v < 2^n, C = vH + rG}
+# This implementation supports proof aggregation and batch verification.
+# In the non-aggregated case, it also supports commitment mask recovery.
+#
+# It is a zero-knowledge proving system for the following relation:
+# {(H,G,N,M),{C_j}_{j=0}^{M-1} ; {v_j,r_j}_{j=0}^{M-1} | for j = 0..M-1, 0 <= v_j < 2^N and C_j = v_j*H + r_j*G}
+#
+# Note that both `N` and `M` must powers of two.
 
 import dumb25519
 from dumb25519 import Point, Scalar, ScalarVector, PointVector, random_scalar, multiexp
@@ -13,12 +19,18 @@ class RangeParameters:
 			raise TypeError('Bad type for parameter H!')
 		if not isinstance(G,Point):
 			raise TypeError('Bad type for parameter G!')
-		if not isinstance(N,int) or N < 1:
-			raise ValueError('Bad type or value for parameter N!')
-		if not isinstance(Gi,PointVector) or not len(Gi) == N:
+		if not isinstance(N,int):
+			raise TypeError('Bad type for parameter N!')
+		if not isinstance(Gi,PointVector):
 			raise ValueError('Bad type or value for parameter Gi!')
-		if not isinstance(Hi,PointVector) or not len(Hi) == N:
+		if not isinstance(Hi,PointVector):
 			raise ValueError('Bad type or value for parameter Hi!')
+		if not len(Gi) == len(Hi):
+			raise ValueError('Size mismatch for parameters Gi and Hi!')
+		
+		# Also need N to be a power of 2
+		if  N < 1 or not (N & (N - 1)) == 0:
+			raise ValueError('Bad value for parameter N!')
 		
 		self.H = H
 		self.G = G
@@ -30,12 +42,26 @@ class RangeStatement:
 	def __init__(self,params,C,seed=None):
 		if not isinstance(params,RangeParameters):
 			raise TypeError('Bad type for parameters!')
-		if not isinstance(C,Point):
+		if not isinstance(C,PointVector):
 			raise TypeError('Bad type for range statement input C!')
+
+		# Also need aggregation factor to be a power of 2
+		M = len(C)
+		if M < 1 or not (M & (M - 1)) == 0:
+			raise ValueError('Bad value for parameter M!')
+		
+		# Need enough generators
+		if len(params.Gi) < M*params.N:
+			raise ValueError('Not enough generators for this statement!')
+		
+		# Mask recovery is only valid when M = 1
+		if seed is not None and M > 1:
+			raise ValueError('Mask recovery is not supported with this statement!')
 
 		self.G = params.G
 		self.H = params.H
 		self.N = params.N
+		self.M = M
 		self.Gi = params.Gi
 		self.Hi = params.Hi
 		self.C = C
@@ -43,11 +69,14 @@ class RangeStatement:
 
 class RangeWitness:
 	def __init__(self,v,r):
-		if not isinstance(v,Scalar):
+		if not isinstance(v,ScalarVector):
 			raise TypeError('Bad type for range witness v!')
-		if not isinstance(r,Scalar):
+		if not isinstance(r,ScalarVector):
 			raise TypeError('Bad type for range witness r!')
+		if not len(v) == len(r):
+			raise IndexError('Range witness data length mismatch!')
 		
+		# Validity of these values is further checked in the prover
 		self.v = v
 		self.r = r
 
@@ -267,31 +296,37 @@ def prove(statement,witness):
 		raise TypeError('Bad type for range witness!')
 	
 	# Check the statement validity
-	if not statement.C == statement.H*witness.v + statement.G*witness.r:
-		raise ArithmeticError('Invalid range statement!')
+	M = len(statement.C)
+	if not len(witness.v) == M or not len(witness.r) == M:
+		raise ValueError('Invalid range statement!')
+	for j in range(M):
+		if not statement.C[j] == statement.H*witness.v[j] + statement.G*witness.r[j]:
+			raise ArithmeticError('Invalid range statement!')
 
 	N = statement.N
 
-	# Curve points
+	# Global generators
 	G = statement.G
 	H = statement.H
-	Gi = statement.Gi
-	Hi = statement.Hi
+	Gi = statement.Gi[:N*M] # only use the necessary generators for this proof size
+	Hi = statement.Hi[:N*M] # only use the necessary generators for this proof size
 
 	tr = transcript.Transcript('Bulletproof+')
 	tr.update(H)
 	tr.update(G)
 	tr.update(N)
+	tr.update(M)
 	tr.update(Gi)
 	tr.update(Hi)
 	tr.update(statement.C)
 
-	one_N = ScalarVector([Scalar(1) for _ in range(N)])
-	two_N = ScalarVector([Scalar(2)**i for i in range(N)])
+	one_MN = ScalarVector([Scalar(1) for _ in range(M*N)])
 
 	# Set bit arrays
-	aL = scalar_to_bits(witness.v,N)
-	aR = aL - one_N
+	aL = ScalarVector([])
+	for j in range(M):
+		aL.extend(scalar_to_bits(witness.v[j],N))
+	aR = aL - one_MN
 
 	alpha = random_scalar() if statement.seed is None else nonce(statement.seed,'alpha')
 	A = Gi**aL + Hi**aR + G*alpha
@@ -301,10 +336,16 @@ def prove(statement,witness):
 	y = tr.challenge()
 	z = tr.challenge()
 
-	# Prepare for inner product
-	aL1 = aL - one_N*z
-	aR1 = aR + two_N*exp_scalar(y,N,desc=True) + one_N*z
-	alpha1 = alpha + witness.r*y**(N+1)
+	# Prepare for inner product (TODO: can be optimized)
+	d = ScalarVector([])
+	for j in range(M):
+		for i in range(N):
+			d.append(z**(2*(j+1))*Scalar(2)**i)
+	aL1 = aL - one_MN*z
+	aR1 = aR + d*exp_scalar(y,M*N,desc=True) + one_MN*z
+	alpha1 = alpha
+	for j in range(M):
+		alpha1 += z**(2*(j+1))*witness.r[j]*y**(M*N+1)
 
 	# Initial inner product inputs
 	ip_data = InnerProductRound(Gi,Hi,G,H,aL1,aR1,alpha1,y,tr,statement.seed)
@@ -321,6 +362,7 @@ def verify(statements,proofs):
 	G = None
 	H = None
 	N = None
+	max_MN = None
 	Gi = None
 	Hi = None
 
@@ -347,18 +389,13 @@ def verify(statements,proofs):
 		else:
 			N = statement.N
 
-		if Gi is not None and statement.Gi != Gi:
-			raise ValueError('Inconsistent range batch statements!')
-		else:
+		if max_MN is None or len(statement.C)*statement.N > max_MN:
+			max_MN = len(statement.C)*statement.N
 			Gi = statement.Gi
-		
-		if Hi is not None and statement.Hi != Hi:
-			raise ValueError('Inconsistent range batch statements!')
-		else:
 			Hi = statement.Hi
 	
 	# Confirm we have valid statement values
-	if G is None or H is None or N is None or Gi is None or Hi is None:
+	if G is None or H is None or N is None or max_MN is None or Gi is None or Hi is None:
 		raise ValueError('Bad range batch statement!')
 		
 	for proof in proofs:
@@ -368,17 +405,12 @@ def verify(statements,proofs):
 	# Weighted coefficients for common generators
 	G_scalar = Scalar(0)
 	H_scalar = Scalar(0)
-	Gi_scalars = ScalarVector([Scalar(0)]*N)
-	Hi_scalars = ScalarVector([Scalar(0)]*N)
+	Gi_scalars = ScalarVector([Scalar(0)]*max_MN)
+	Hi_scalars = ScalarVector([Scalar(0)]*max_MN)
 
 	# Final multiscalar multiplication data
 	scalars = ScalarVector([])
 	points = PointVector([])
-
-	# Helpful quantities
-	one_N = ScalarVector([Scalar(1) for _ in range(N)])
-	two_N = ScalarVector([Scalar(2)**i for i in range(N)])
-	one_N_two_N = one_N**two_N
 
 	# Recovered masks
 	masks = []
@@ -398,8 +430,12 @@ def verify(statements,proofs):
 
 		if not len(L) == len(R):
 			raise IndexError
-		if not 2**len(L) == N:
+		if not 2**len(L) == len(C)*N:
 			raise IndexError
+		
+		# Helper values
+		M = len(C)
+		one_MN = ScalarVector([Scalar(1) for _ in range(M*N)])
 		
 		# Batch weight
 		weight = random_scalar()
@@ -411,8 +447,9 @@ def verify(statements,proofs):
 		tr.update(H)
 		tr.update(G)
 		tr.update(N)
-		tr.update(Gi)
-		tr.update(Hi)
+		tr.update(M)
+		tr.update(Gi[:N*M])
+		tr.update(Hi[:N*M])
 		tr.update(C)
 
 		# Reconstruct challenges
@@ -423,7 +460,14 @@ def verify(statements,proofs):
 		z = tr.challenge()
 		if z == Scalar(0):
 			raise ArithmeticError('Bad verifier challenge!')
+		
+		# Helper value (TODO: optimize this)
+		d = ScalarVector([])
+		for j in range(M):
+			for i in range(N):
+				d.append(z**(2*(j+1))*Scalar(2)**i)
 
+		# More challenges
 		challenges = ScalarVector([]) # round challenges
 		for j in range(len(L)):
 			tr.update(L[j])
@@ -438,21 +482,21 @@ def verify(statements,proofs):
 		if e == Scalar(0):
 			raise ArithmeticError('Bad verifier challenge!')
 
-		# Recover the mask if possible
-		if seed is not None:
+		# Recover the mask if possible (only for non-aggregated proofs)
+		if M == 1 and seed is not None:
 			mask = (d1 - nonce(seed,'eta') - e*nonce(seed,'d'))*e.invert()**2
 			mask -= nonce(seed,'alpha')
 			for j in range(len(challenges)):
 				mask -= challenges[j]**2*nonce(seed,'dL',j)
 				mask -= challenges_inv[j]**2*nonce(seed,'dR',j)
-			mask *= y.invert()**(N+1)
+			mask *= (z**2*y**(N+1)).invert()
 
 			masks.append(mask)
 		else:
 			masks.append(None)
 
 		# Aggregate the generator scalars
-		for i in range(N):
+		for i in range(M*N):
 			index = i
 			g = r1*e*y.invert()**i
 			h = s1*e
@@ -467,13 +511,14 @@ def verify(statements,proofs):
 					h *= challenges_inv[J]
 					index -= base_power
 			Gi_scalars[i] += weight*(g + e**2*z)
-			Hi_scalars[i] += weight*(h - e**2*(two_N[i]*y**(N-i)+z))
+			Hi_scalars[i] += weight*(h - e**2*(d[i]*y**(M*N-i)+z))
 
 		# Remaining terms
-		scalars.append(weight*(-e**2*y**(N+1)))
-		points.append(C)
+		for j in range(M):
+			scalars.append(weight*(-e**2*z**(2*(j+1))*y**(M*N+1)))
+			points.append(C[j])
 
-		H_scalar += weight*(r1*y*s1 + e**2*(y**(N+1)*z*one_N_two_N + (z**2-z)*one_N**exp_scalar(y,N)))
+		H_scalar += weight*(r1*y*s1 + e**2*(y**(M*N+1)*z*one_MN**d + (z**2-z)*one_MN**exp_scalar(y,M*N)))
 		G_scalar += weight*d1
 
 		scalars.append(weight*-e)
@@ -494,7 +539,7 @@ def verify(statements,proofs):
 	points.append(G)
 	scalars.append(H_scalar)
 	points.append(H)
-	for i in range(N):
+	for i in range(max_MN):
 		scalars.append(Gi_scalars[i])
 		points.append(Gi[i])
 		scalars.append(Hi_scalars[i])
