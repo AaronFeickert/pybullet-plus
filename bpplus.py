@@ -112,13 +112,13 @@ class RangeProof:
 
 # Data for a round of the inner product argument
 class InnerProductRound:
-	def __init__(self,Gi,Hi,G,H,a,b,alpha,y,tr,seed):
+	def __init__(self,Gi,Hi,G,H,a,b,alpha,y_powers,tr,seed):
 		# Common data
 		self.Gi = Gi
 		self.Hi = Hi
 		self.G = G
 		self.H = H
-		self.y = y
+		self.y_powers = y_powers
 		self.done = False
 
 		# Prover data
@@ -178,26 +178,6 @@ def nonce(seed,label,j=None):
 		# Update the hash with any fixed value to try again!
 		hasher.update(b'0')
 
-# Compute a weighted inner product
-#
-# INPUTS
-#   a,b: (ScalarVector)
-#   y: weight (Scalar)
-# OUTPUTS
-#   Scalar
-def wip(a,b,y):
-	if not len(a) == len(b):
-		raise IndexError('Weighted inner product vectors must have identical size!')
-	if not isinstance(a,ScalarVector) or not isinstance(b,ScalarVector):
-		raise TypeError('Weighted inner product requires ScalarVectors!')
-	if not isinstance(y,Scalar):
-		raise TypeError('Weighted inner product requires Scalar weight!')
-
-	r = Scalar(0)
-	for i in range(len(a)):
-		r += a[i]*y**(i+1)*b[i]
-	return r
-
 # Turn a scalar into a vector of bit scalars
 #
 # INPUTS
@@ -208,26 +188,12 @@ def wip(a,b,y):
 def scalar_to_bits(s,N):
 	result = []
 	for i in range(N-1,-1,-1):
-		if s/Scalar(2**i) == Scalar(0):
+		if s/Scalar(1 << i) == Scalar(0):
 			result.append(Scalar(0))
 		else:
 			result.append(Scalar(1))
-			s -= Scalar(2**i)
+			s -= Scalar(1 << i)
 	return ScalarVector(list(reversed(result)))
-
-# Generate a vector of powers of a scalar, in either direction, indexed at 1
-#
-# INPUTS
-#   s: (Scalar)
-#   l: number of powers to include (int)
-#   desc: whether to use a descending indexing (bool)
-# OUTPUTS
-#   ScalarVector
-def exp_scalar(s,l,desc=False):
-	if desc:
-		return ScalarVector([s**(l-i) for i in range(l)])
-	else:
-		return ScalarVector([s**(i+1) for i in range(l)])
 
 # Perform an inner-product proof round
 #
@@ -245,8 +211,8 @@ def inner_product(data):
 		d = random_scalar() if data.seed is None else nonce(data.seed,'d')
 		eta = random_scalar() if data.seed is None else nonce(data.seed,'eta')
 
-		data.A = data.Gi[0]*r + data.Hi[0]*s + data.H*(r*data.y*data.b[0] + s*data.y*data.a[0]) + data.G*d
-		data.B = data.H*(r*data.y*s) + data.G*eta
+		data.A = data.Gi[0]*r + data.Hi[0]*s + data.H*(r*data.y_powers[1]*data.b[0] + s*data.y_powers[1]*data.a[0]) + data.G*d
+		data.B = data.H*(r*data.y_powers[1]*s) + data.G*eta
 
 		data.tr.update(data.A)
 		data.tr.update(data.B)
@@ -267,26 +233,46 @@ def inner_product(data):
 	G2 = data.Gi[n:]
 	H1 = data.Hi[:n]
 	H2 = data.Hi[n:]
+	y_n_inverse = data.y_powers[n].invert()
 
 	dL = random_scalar() if data.seed is None else nonce(data.seed,'dL',data.round)
 	dR = random_scalar() if data.seed is None else nonce(data.seed,'dR',data.round)
 	data.round += 1
 
-	cL = wip(a1,b2,data.y)
-	cR = wip(a2*data.y**n,b1,data.y)
-	data.L.append(G2**(a1*data.y.invert()**n) + H1**b2 + data.H*cL + data.G*dL)
-	data.R.append(G1**(a2*data.y**n) + H2**b1 + data.H*cR + data.G*dR)
+	cL = Scalar(0)
+	cR = Scalar(0)
+	for i in range(n):
+		cL += a1[i]*data.y_powers[i + 1]*b2[i]
+		cR += a2[i]*data.y_powers[n + i + 1]*b1[i]
+	
+	# Compute L and R by multiscalar multiplication
+	L_scalars = ScalarVector([cL, dL])
+	L_points = PointVector([data.H, data.G])
+	R_scalars = ScalarVector([cR, dR])
+	R_points = PointVector([data.H, data.G])
+	for i in range(n):
+		L_scalars.append(a1[i]*y_n_inverse)
+		L_points.append(G2[i])
+		L_scalars.append(b2[i])
+		L_points.append(H1[i])
+		R_scalars.append(a2[i]*data.y_powers[n])
+		R_points.append(G1[i])
+		R_scalars.append(b1[i])
+		R_points.append(H2[i])
+	data.L.append(multiexp(L_scalars, L_points))
+	data.R.append(multiexp(R_scalars, R_points))
 
 	data.tr.update(data.L[-1])
 	data.tr.update(data.R[-1])
 	e = data.tr.challenge()
+	e_inverse = e.invert()
 
-	data.Gi = G1*e.invert() + G2*(e*data.y.invert()**n)
-	data.Hi = H1*e + H2*e.invert()
+	data.Gi = G1*e_inverse + G2*(e*y_n_inverse)
+	data.Hi = H1*e + H2*e_inverse
 
-	data.a = a1*e + a2*data.y**n*e.invert()
-	data.b = b1*e.invert() + b2*e
-	data.alpha = dL*e**2 + data.alpha + dR*e.invert()**2
+	data.a = a1*e + a2*data.y_powers[n]*e_inverse
+	data.b = b1*e_inverse + b2*e
+	data.alpha = dL*e**2 + data.alpha + dR*e_inverse**2
 
 # Generate a proof
 def prove(statement,witness):
@@ -320,35 +306,55 @@ def prove(statement,witness):
 	tr.update(Hi)
 	tr.update(statement.C)
 
-	one_MN = ScalarVector([Scalar(1) for _ in range(M*N)])
-
 	# Set bit arrays
 	aL = ScalarVector([])
+	aR = ScalarVector([])
 	for j in range(M):
-		aL.extend(scalar_to_bits(witness.v[j],N))
-	aR = aL - one_MN
+		bits = scalar_to_bits(witness.v[j], N)
+		aL.extend(bits)
+		aR.extend(ScalarVector([bit - Scalar(1) for bit in bits]))
 
+	# Compute A by multiscalar multiplication
 	alpha = random_scalar() if statement.seed is None else nonce(statement.seed,'alpha')
-	A = Gi**aL + Hi**aR + G*alpha
+	A_scalars = ScalarVector([alpha])
+	A_points = PointVector([G])
+	for i in range(N*M):
+		A_scalars.append(aL[i])
+		A_points.append(Gi[i])
+		A_scalars.append(aR[i])
+		A_points.append(Hi[i])
+	A = multiexp(A_scalars, A_points)
 
 	# Get challenges
 	tr.update(A)
 	y = tr.challenge()
 	z = tr.challenge()
+	z_square = z**2
 
-	# Prepare for inner product (TODO: can be optimized)
-	d = ScalarVector([])
-	for j in range(M):
+	# Compute powers of the challenge
+	y_powers = ScalarVector([Scalar(1)])
+	for _ in range(1, M*N + 2):
+		y_powers.append(y_powers[-1]*y)
+
+	# Compute d efficiently
+	d = ScalarVector([z_square])
+	for i in range(1, N):
+		d.append(Scalar(2)*d[i-1])
+	for j in range(1, M):
 		for i in range(N):
-			d.append(z**(2*(j+1))*Scalar(2)**i)
-	aL1 = aL - one_MN*z
-	aR1 = aR + d*exp_scalar(y,M*N,desc=True) + one_MN*z
+			d.append(d[(j-1)*N + i]*z_square)
+
+	# Prepare for inner product
+	aL1 = aL - ScalarVector([z for _ in range(N*M)])
+	aR1 = aR + ScalarVector([d[i]*y_powers[N*M - i] + z for i in range(N*M)])
 	alpha1 = alpha
+	z_even_powers = 1
 	for j in range(M):
-		alpha1 += z**(2*(j+1))*witness.r[j]*y**(M*N+1)
+		z_even_powers *= z_square
+		alpha1 += z_even_powers*witness.r[j]*y_powers[N*M + 1]
 
 	# Initial inner product inputs
-	ip_data = InnerProductRound(Gi,Hi,G,H,aL1,aR1,alpha1,y,tr,statement.seed)
+	ip_data = InnerProductRound(Gi,Hi,G,H,aL1,aR1,alpha1,y_powers,tr,statement.seed)
 	while True:
 		inner_product(ip_data)
 
@@ -402,6 +408,19 @@ def verify(statements,proofs):
 		if not isinstance(proof,RangeProof):
 			raise TypeError('Bad type for range proof!')
 	
+	# Compute log2(N)
+	log_N = 0
+	temp_N = N >> 1
+	while temp_N != 0:
+		log_N += 1
+		temp_N >>= 1
+
+	# Compute 2**N-1 for later use
+	TWO_N_MINUS_ONE = Scalar(2)
+	for i in range(log_N):
+		TWO_N_MINUS_ONE *= TWO_N_MINUS_ONE
+	TWO_N_MINUS_ONE -= Scalar(1)
+
 	# Weighted coefficients for common generators
 	G_scalar = Scalar(0)
 	H_scalar = Scalar(0)
@@ -430,12 +449,12 @@ def verify(statements,proofs):
 
 		if not len(L) == len(R):
 			raise IndexError
-		if not 2**len(L) == len(C)*N:
+		if not 1 << len(L) == len(C)*N:
 			raise IndexError
 		
 		# Helper values
 		M = len(C)
-		one_MN = ScalarVector([Scalar(1) for _ in range(M*N)])
+		rounds = len(L)
 		
 		# Batch weight
 		weight = random_scalar()
@@ -460,16 +479,9 @@ def verify(statements,proofs):
 		z = tr.challenge()
 		if z == Scalar(0):
 			raise ArithmeticError('Bad verifier challenge!')
-		
-		# Helper value (TODO: optimize this)
-		d = ScalarVector([])
-		for j in range(M):
-			for i in range(N):
-				d.append(z**(2*(j+1))*Scalar(2)**i)
 
-		# More challenges
 		challenges = ScalarVector([]) # round challenges
-		for j in range(len(L)):
+		for j in range(rounds):
 			tr.update(L[j])
 			tr.update(R[j])
 			challenges.append(tr.challenge())
@@ -482,56 +494,95 @@ def verify(statements,proofs):
 		if e == Scalar(0):
 			raise ArithmeticError('Bad verifier challenge!')
 
+		# Compute useful challenge values
+		z_square = z**2
+		e_square = e**2
+		y_inverse = y.invert()
+
+		y_NM = y
+		for j in range(rounds):
+			y_NM *= y_NM
+
+		y_NM_1 = y_NM*y
+
+		y_sum = Scalar(0)
+		y_sum_temp = y
+		for i in range(N*M):
+			y_sum += y_sum_temp
+			y_sum_temp *= y
+		
+		# Compute d efficiently
+		d = ScalarVector([z_square])
+		for i in range(1, N):
+			d.append(Scalar(2)*d[i-1])
+		for j in range(1, M):
+			for i in range(N):
+				d.append(d[(j-1)*N + i]*z_square)
+		
+		# Compute its sum efficiently
+		d_sum = z_square
+		d_sum_temp_z = z_square
+		d_sum_temp_2M = 2*M
+		while d_sum_temp_2M > 2:
+			d_sum += d_sum*d_sum_temp_z
+			d_sum_temp_z *= d_sum_temp_z
+			d_sum_temp_2M //= 2
+		d_sum *= TWO_N_MINUS_ONE
+
 		# Recover the mask if possible (only for non-aggregated proofs)
 		if M == 1 and seed is not None:
 			mask = (d1 - nonce(seed,'eta') - e*nonce(seed,'d'))*e.invert()**2
 			mask -= nonce(seed,'alpha')
-			for j in range(len(challenges)):
+			for j in range(rounds):
 				mask -= challenges[j]**2*nonce(seed,'dL',j)
 				mask -= challenges_inv[j]**2*nonce(seed,'dR',j)
-			mask *= (z**2*y**(N+1)).invert()
+			mask *= (z_square*y_NM_1).invert()
 
 			masks.append(mask)
 		else:
 			masks.append(None)
 
 		# Aggregate the generator scalars
+		y_inv_i = Scalar(1)
+		y_NM_i = y_NM
 		for i in range(M*N):
-			index = i
-			g = r1*e*y.invert()**i
+			g = r1*e*y_inv_i
 			h = s1*e
-			for j in range(len(L)-1,-1,-1):
-				J = len(challenges)-j-1
-				base_power = 2**j
-				if index//base_power == 0: # rounded down
-					g *= challenges_inv[J]
-					h *= challenges[J]
-				else:
+			for j in range(rounds):
+				J = rounds - j - 1
+				if (i >> j) & 1:
 					g *= challenges[J]
 					h *= challenges_inv[J]
-					index -= base_power
+				else:
+					g *= challenges_inv[J]
+					h *= challenges[J]
 			Gi_scalars[i] += weight*(g + e**2*z)
-			Hi_scalars[i] += weight*(h - e**2*(d[i]*y**(M*N-i)+z))
+			Hi_scalars[i] += weight*(h - e**2*(d[i]*y_NM_i+z))
+
+			y_inv_i *= y_inverse
+			y_NM_i *= y_inverse
 
 		# Remaining terms
+		z_even_powers = Scalar(1)
 		for j in range(M):
-			scalars.append(weight*(-e**2*z**(2*(j+1))*y**(M*N+1)))
+			z_even_powers *= z_square
+			scalars.append(weight*(-e_square*z_even_powers*y_NM_1))
 			points.append(C[j])
 
-		H_scalar += weight*(r1*y*s1 + e**2*(y**(M*N+1)*z*one_MN**d + (z**2-z)*one_MN**exp_scalar(y,M*N)))
+		H_scalar += weight*(r1*y*s1 + e_square*(y_NM_1*z*d_sum + (z**2-z)*y_sum))
 		G_scalar += weight*d1
 
 		scalars.append(weight*-e)
 		points.append(A1)
 		scalars.append(-weight)
 		points.append(B)
-		scalars.append(weight*-e**2)
+		scalars.append(weight*-e_square)
 		points.append(A)
 
-		for j in range(len(L)):
-			scalars.append(weight*(-e**2*challenges[j]**2))
+		for j in range(rounds):
+			scalars.append(weight*(-e_square*challenges[j]**2))
 			points.append(L[j])
-			scalars.append(weight*(-e**2*challenges_inv[j]**2))
+			scalars.append(weight*(-e_square*challenges_inv[j]**2))
 			points.append(R[j])
 
 	# Common generators
