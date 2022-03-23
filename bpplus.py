@@ -67,18 +67,22 @@ class RangeStatement:
 		self.C = C
 		self.seed = seed
 
-class RangeWitness:
+class CommitmentOpening:
 	def __init__(self,v,r):
-		if not isinstance(v,ScalarVector):
-			raise TypeError('Bad type for range witness v!')
-		if not isinstance(r,ScalarVector):
-			raise TypeError('Bad type for range witness r!')
-		if not len(v) == len(r):
-			raise IndexError('Range witness data length mismatch!')
+		if not isinstance(v,Scalar):
+			raise TypeError('Bad type for commitment opening v!')
+		if not isinstance(r,Scalar):
+			raise TypeError('Bad type for commitment opening r!')
 		
-		# Validity of these values is further checked in the prover
 		self.v = v
 		self.r = r
+
+class RangeWitness:
+	def __init__(self,openings):
+		if not isinstance(openings,list):
+			raise TypeError('Bad type for range witness!')
+		
+		self.openings = openings
 
 class RangeProof:
 	def __init__(self,A,A1,B,r1,s1,d1,L,R):
@@ -283,10 +287,10 @@ def prove(statement,witness):
 	
 	# Check the statement validity
 	M = len(statement.C)
-	if not len(witness.v) == M or not len(witness.r) == M:
+	if not len(witness.openings) == M:
 		raise ValueError('Invalid range statement!')
 	for j in range(M):
-		if not statement.C[j] == statement.H*witness.v[j] + statement.G*witness.r[j]:
+		if not statement.C[j] == statement.H*witness.openings[j].v + statement.G*witness.openings[j].r:
 			raise ArithmeticError('Invalid range statement!')
 
 	N = statement.N
@@ -310,7 +314,7 @@ def prove(statement,witness):
 	aL = ScalarVector([])
 	aR = ScalarVector([])
 	for j in range(M):
-		bits = scalar_to_bits(witness.v[j], N)
+		bits = scalar_to_bits(witness.openings[j].v, N)
 		aL.extend(bits)
 		aR.extend(ScalarVector([bit - Scalar(1) for bit in bits]))
 
@@ -351,7 +355,7 @@ def prove(statement,witness):
 	z_even_powers = 1
 	for j in range(M):
 		z_even_powers *= z_square
-		alpha1 += z_even_powers*witness.r[j]*y_powers[N*M + 1]
+		alpha1 += z_even_powers*witness.openings[j].r*y_powers[N*M + 1]
 
 	# Initial inner product inputs
 	ip_data = InnerProductRound(Gi,Hi,G,H,aL1,aR1,alpha1,y_powers,tr,statement.seed)
