@@ -60,11 +60,12 @@ class TestBPPlus(unittest.TestCase):
 		for j in range(len(M)):
 			# Generate the witness
 			openings = []
-			for _ in range(M[j]):
+			for i in range(M[j]):
 				v = Scalar(randrange(1 << params.N))
 				r = random_scalar()
 				openings.append(bpplus.CommitmentOpening(v,r))
-				masks.append(r if M[j] == 1 else None)
+				if i == 0:
+					masks.append(r if M[j] == 1 else None)
 			witness = bpplus.RangeWitness(openings)
 
 			# Generate the statement
