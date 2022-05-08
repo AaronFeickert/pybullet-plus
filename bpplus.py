@@ -547,19 +547,26 @@ def verify(statements,proofs):
 			masks.append(None)
 
 		# Aggregate the generator scalars
+		s = ScalarVector([Scalar(1)])
+		for j in range(rounds):
+			s[0] *= challenges_inv[j]
+		
+		for i in range(1,M*N):
+			lg_i = 32 - 1 - "{:032b}".format(i).index("1")
+			k = 1 << lg_i
+			u_lg_i_sq = challenges[rounds - 1 - lg_i]**2
+			print(i,lg_i,rounds-1-lg_i)
+			s.append(s[i - k] * u_lg_i_sq)
+
 		y_inv_i = Scalar(1)
 		y_NM_i = y_NM
 		for i in range(M*N):
 			g = r1*e*y_inv_i
 			h = s1*e
-			for j in range(rounds):
-				J = rounds - j - 1
-				if (i >> j) & 1:
-					g *= challenges[J]
-					h *= challenges_inv[J]
-				else:
-					g *= challenges_inv[J]
-					h *= challenges[J]
+
+			g *= s[i]
+			h *= s[-i-1]
+					
 			Gi_scalars[i] += weight*(g + e**2*z)
 			Hi_scalars[i] += weight*(h - e**2*(d[i]*y_NM_i+z))
 
